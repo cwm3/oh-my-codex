@@ -748,6 +748,212 @@ describe('keyword detector skill-active-state lifecycle', () => {
     }
   });
 
+  it('does not advance the supervised child phase past an unsatisfied deep-interview gate via keyword handoff', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-keyword-supervised-gate-'));
+    const stateDir = join(cwd, '.omx', 'state');
+    try {
+      await mkdir(stateDir, { recursive: true });
+
+      // Activate Autopilot: seeds autopilot-state.json at current_phase=deep-interview
+      // with deep_interview_gate.status="required" (gate not satisfied).
+      const activated = await recordSkillActivation({
+        stateDir,
+        text: 'please run $autopilot',
+        sessionId: 'sess-gate',
+        threadId: 'thread-gate',
+        turnId: 'turn-1',
+        nowIso: '2026-02-25T00:00:00.000Z',
+      });
+      assert.equal(activated?.phase, 'deep-interview');
+
+      const autopilotStatePath = join(stateDir, 'sessions', 'sess-gate', 'autopilot-state.json');
+      const beforeAdvance = JSON.parse(await readFile(autopilotStatePath, 'utf-8')) as { current_phase: string };
+      assert.equal(beforeAdvance.current_phase, 'deep-interview');
+
+      // A bare `$ralplan` keyword handoff must not advance current_phase across the
+      // deep-interview -> ralplan gate while the gate is unsatisfied. The keyword
+      // path now defers to the same gate as the state_write backend.
+      const denied = await recordSkillActivation({
+        stateDir,
+        text: 'continue with $ralplan',
+        sessionId: 'sess-gate',
+        threadId: 'thread-gate',
+        turnId: 'turn-2',
+        nowIso: '2026-02-25T00:01:00.000Z',
+      });
+
+      const afterAdvance = JSON.parse(await readFile(autopilotStatePath, 'utf-8')) as { current_phase: string };
+      assert.equal(
+        afterAdvance.current_phase,
+        'deep-interview',
+        'keyword handoff must not skip the deep-interview gate',
+      );
+
+      // The visible canonical skill-active state must stay aligned with the held
+      // detail phase (no drift to ralplan) — both the returned state and the
+      // persisted skill-active-state.json mirror.
+      assert.equal(denied?.phase, 'deep-interview');
+      assert.deepEqual(denied?.active_skills?.map((entry) => [entry.skill, entry.phase]), [['autopilot', 'deep-interview']]);
+      const canonical = JSON.parse(
+        await readFile(join(stateDir, 'sessions', 'sess-gate', SKILL_ACTIVE_STATE_FILE), 'utf-8'),
+      ) as { phase?: string; active_skills?: Array<{ skill?: string; phase?: string }> };
+      assert.equal(canonical.phase, 'deep-interview');
+      assert.deepEqual(canonical.active_skills?.map((entry) => [entry.skill, entry.phase]), [['autopilot', 'deep-interview']]);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('does not let a keyword jump ahead past a planning gate (forward skip)', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-keyword-skip-ahead-'));
+    const stateDir = join(cwd, '.omx', 'state');
+    try {
+      await mkdir(stateDir, { recursive: true });
+      await recordSkillActivation({
+        stateDir,
+        text: 'please run $autopilot',
+        sessionId: 'sess-skip',
+        threadId: 'thread-skip',
+        turnId: 'turn-1',
+        nowIso: '2026-02-25T00:00:00.000Z',
+      });
+
+      // `$ultragoal` while in deep-interview skips the ralplan gate entirely; the
+      // keyword handoff must hold the current phase rather than jump ahead.
+      const result = await recordSkillActivation({
+        stateDir,
+        text: 'jump straight to $ultragoal',
+        sessionId: 'sess-skip',
+        threadId: 'thread-skip',
+        turnId: 'turn-2',
+        nowIso: '2026-02-25T00:01:00.000Z',
+      });
+
+      const autopilotState = JSON.parse(
+        await readFile(join(stateDir, 'sessions', 'sess-skip', 'autopilot-state.json'), 'utf-8'),
+      ) as { current_phase: string };
+      assert.equal(autopilotState.current_phase, 'deep-interview', 'forward skip must be held');
+      // skill-active phase is kept in sync with the held autopilot phase.
+      assert.equal(result?.phase, 'deep-interview');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('does not advance or drift canonical state past an unsatisfied ralplan -> ultragoal gate', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-keyword-ralplan-gate-'));
+    const stateDir = join(cwd, '.omx', 'state');
+    const sessionId = 'sess-ralplan-gate';
+    try {
+      await mkdir(join(stateDir, 'sessions', sessionId), { recursive: true });
+      // Supervised Autopilot already in ralplan, with no ralplan consensus evidence
+      // (the ralplan -> ultragoal gate is unsatisfied).
+      await writeFile(
+        join(stateDir, 'sessions', sessionId, SKILL_ACTIVE_STATE_FILE),
+        JSON.stringify({
+          version: 1,
+          active: true,
+          skill: 'autopilot',
+          keyword: '$autopilot',
+          phase: 'ralplan',
+          source: 'keyword-detector',
+          session_id: sessionId,
+          active_skills: [{ skill: 'autopilot', phase: 'ralplan', active: true, session_id: sessionId }],
+        }, null, 2),
+      );
+      const autopilotStatePath = join(stateDir, 'sessions', sessionId, 'autopilot-state.json');
+      await writeFile(
+        autopilotStatePath,
+        JSON.stringify({ active: true, mode: 'autopilot', current_phase: 'ralplan', session_id: sessionId }, null, 2),
+      );
+      await writeFile(
+        join(stateDir, 'sessions', sessionId, 'ralplan-state.json'),
+        JSON.stringify({
+          active: true,
+          mode: 'ralplan',
+          current_phase: 'planning',
+          session_id: sessionId,
+        }, null, 2),
+      );
+
+      const denied = await recordSkillActivation({
+        stateDir,
+        text: 'advance to $ultragoal',
+        sessionId,
+        threadId: 'thread-ralplan-gate',
+        turnId: 'turn-ralplan-gate',
+        nowIso: '2026-02-25T00:01:00.000Z',
+      });
+
+      const afterAdvance = JSON.parse(await readFile(autopilotStatePath, 'utf-8')) as { current_phase: string };
+      assert.equal(afterAdvance.current_phase, 'ralplan', 'keyword handoff must not skip the ralplan -> ultragoal gate');
+      assert.equal(denied?.phase, 'ralplan');
+      assert.deepEqual(denied?.active_skills?.map((entry) => [entry.skill, entry.phase]), [['autopilot', 'ralplan']]);
+      const ralplanState = JSON.parse(
+        await readFile(join(stateDir, 'sessions', sessionId, 'ralplan-state.json'), 'utf-8'),
+      ) as { active?: boolean; current_phase?: string };
+      assert.equal(ralplanState.active, true, 'blocked gate must not auto-complete ralplan state');
+      assert.equal(ralplanState.current_phase, 'planning', 'blocked gate must not advance ralplan state');
+      const canonical = JSON.parse(
+        await readFile(join(stateDir, 'sessions', sessionId, SKILL_ACTIVE_STATE_FILE), 'utf-8'),
+      ) as { phase?: string; active_skills?: Array<{ skill?: string; phase?: string }> };
+      assert.equal(canonical.phase, 'ralplan');
+      assert.deepEqual(canonical.active_skills?.map((entry) => [entry.skill, entry.phase]), [['autopilot', 'ralplan']]);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('does not let an implementation-phase keyword skip the code-review gate to ultraqa', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-keyword-ultraqa-skip-'));
+    const stateDir = join(cwd, '.omx', 'state');
+    const sessionId = 'sess-ultraqa-skip';
+    try {
+      await mkdir(join(stateDir, 'sessions', sessionId), { recursive: true });
+      // Supervised Autopilot in an implementation phase (ultragoal). The completion
+      // gate requires code-review before ultraqa.
+      await writeFile(
+        join(stateDir, 'sessions', sessionId, SKILL_ACTIVE_STATE_FILE),
+        JSON.stringify({
+          version: 1,
+          active: true,
+          skill: 'autopilot',
+          keyword: '$autopilot',
+          phase: 'ultragoal',
+          source: 'keyword-detector',
+          session_id: sessionId,
+          active_skills: [{ skill: 'autopilot', phase: 'ultragoal', active: true, session_id: sessionId }],
+        }, null, 2),
+      );
+      const autopilotStatePath = join(stateDir, 'sessions', sessionId, 'autopilot-state.json');
+      await writeFile(
+        autopilotStatePath,
+        JSON.stringify({ active: true, mode: 'autopilot', current_phase: 'ultragoal', session_id: sessionId }, null, 2),
+      );
+
+      const denied = await recordSkillActivation({
+        stateDir,
+        text: 'run $ultraqa now',
+        sessionId,
+        threadId: 'thread-ultraqa-skip',
+        turnId: 'turn-ultraqa-skip',
+        nowIso: '2026-02-25T00:01:00.000Z',
+      });
+
+      const afterAdvance = JSON.parse(await readFile(autopilotStatePath, 'utf-8')) as { current_phase: string };
+      assert.equal(afterAdvance.current_phase, 'ultragoal', 'keyword handoff must not skip the code-review gate');
+      assert.equal(denied?.phase, 'ultragoal');
+      assert.deepEqual(denied?.active_skills?.map((entry) => [entry.skill, entry.phase]), [['autopilot', 'ultragoal']]);
+      const canonical = JSON.parse(
+        await readFile(join(stateDir, 'sessions', sessionId, SKILL_ACTIVE_STATE_FILE), 'utf-8'),
+      ) as { phase?: string; active_skills?: Array<{ skill?: string; phase?: string }> };
+      assert.equal(canonical.phase, 'ultragoal');
+      assert.deepEqual(canonical.active_skills?.map((entry) => [entry.skill, entry.phase]), [['autopilot', 'ultragoal']]);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it('seeds dedicated planner routing in Autopilot state when main is cheap', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-keyword-autopilot-planner-routing-'));
     const stateDir = join(cwd, '.omx', 'state');
