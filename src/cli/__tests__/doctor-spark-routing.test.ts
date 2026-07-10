@@ -76,6 +76,16 @@ describe('checkSparkRouting', () => {
     assert.match(result.message, /source: \.omx-config\.json env/);
   });
 
+  it('reports models.team_low_complexity as the source for a low-complexity Spark override', () => {
+    writeFileSync(join(workDir, '.omx-config.json'), JSON.stringify({
+      models: { team_low_complexity: 'custom-spark' },
+    }));
+    writeExploreToml('name = "explore"\nmodel = "custom-spark"\n');
+
+    const result = checkSparkRouting(makePaths(workDir));
+    assert.match(result.message, /source: \.omx-config\.json models\.team_low_complexity/);
+  });
+
   it('warns when the Spark-lane agent toml is missing', () => {
     const result = checkSparkRouting(makePaths(workDir));
     assert.equal(result.status, 'warn');

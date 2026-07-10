@@ -76,6 +76,7 @@ import {
 	OMX_SPARK_MODEL_ENV,
 	getAgentModelOverride,
 	getCodexConfigRootModelProvider,
+	getConfiguredTeamLowComplexityModel,
 	getEnvConfiguredSparkDefaultModel,
 	getMainDefaultModel,
 	getSparkDefaultModel,
@@ -2559,6 +2560,9 @@ function resolveSparkModelSource(codexHomeOverride?: string): string {
 	}
 	if (getEnvConfiguredSparkDefaultModel(process.env, codexHomeOverride)) {
 		return ".omx-config.json env";
+	}
+	if (getConfiguredTeamLowComplexityModel(codexHomeOverride)) {
+		return ".omx-config.json models.team_low_complexity";
 	}
 	return "built-in default";
 }

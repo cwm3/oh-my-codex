@@ -153,6 +153,11 @@ function readTeamLowComplexityOverride(codexHomeOverride?: string): string | und
   return undefined;
 }
 
+/** Configured `models.team_low_complexity` (or alias-key) override, if any. */
+export function getConfiguredTeamLowComplexityModel(codexHomeOverride?: string): string | undefined {
+  return readTeamLowComplexityOverride(codexHomeOverride);
+}
+
 export function readConfiguredEnvOverrides(codexHomeOverride?: string): NodeJS.ProcessEnv {
   const config = readOmxConfigFile(codexHomeOverride);
   if (!config || !config.env || typeof config.env !== 'object' || Array.isArray(config.env)) {
